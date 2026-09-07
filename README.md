@@ -150,6 +150,6 @@ Per-solution accuracy on the test and group-holdout OOD splits (500 posterior dr
 
 ## License
 
-Code: MIT (license file will be added after the review period)
+Code: MIT
 
 Data (`spectra.parquet`, `manifest.parquet`): [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
