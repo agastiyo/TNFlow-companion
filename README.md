@@ -1,6 +1,6 @@
 # TNFlow
 
-Companion repository for the paper: [arXiv link placeholder]
+Companion repository for the paper: [TNFlow: Amortized Posterior Inference for Trans-Neptunian Object Surface Composition](https://arxiv.org/abs/2609.04305)
 
 This repository contains the code and pretrained model needed to reproduce the results reported in the paper. It is not an official release of TNFlow.
 
