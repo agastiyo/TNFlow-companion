@@ -1,7 +1,7 @@
 """Component material <-> integer code mapping for the CNF target.
 
 K=20, codes 0..19. Originally reduced K=25 -> K=15; five materials
-now available as SDOC optical constants and generated in bulk by generate_shkuratov.py -- CO,
+now available as SDOC optical constants and generated in bulk by src/simulator/generate.py -- CO,
 C2H6, C2H4, NH3, Pyroxene (codes 15..19) -- have since been re-added. Spectra containing a
 still-dropped component are skipped at build time: ``encode`` raises ``DroppedComponentError``
 for their titles, which the source processors catch.

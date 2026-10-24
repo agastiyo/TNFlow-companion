@@ -1,4 +1,9 @@
-"""GrainFlow: per-component grain-size posterior (shared 1-D NSF over standardized log10 grain)."""
+"""GrainFlow: per-component grain-size posterior q(g_k | h, c, k).
+
+One 1-D NSF over standardized log10 grain, z = (log10(g / µm) − mean) / std, shared by all K
+components; the component enters through a learned embedding. Conditioning vector per
+(spectrum, component) pair: [context h, composition c, embed(k)].
+"""
 
 import torch
 import torch.nn as nn
@@ -8,7 +13,7 @@ from src.data_utils.components import K
 
 GRAIN_EPS = 1e-6  # floor for log10 on the grain target
 
-# A composition draw "contains" component k when w_k exceeds this threshold.
+# A composition draw "contains" component k when c_k exceeds this threshold.
 PRESENT_THRESH = 0.01
 
 
@@ -26,23 +31,30 @@ class GrainFlow(nn.Module):
     def _cond(self, c, comp, idx):
         return torch.cat([c, comp, self.embed(idx)], dim=-1)
 
+    def _cond_all(self, c, comp):
+        """Conditioning for every (row, component) pair: c [B, d], comp [B, K] -> [B·K, d + K + embed]."""
+        b = comp.shape[0]
+        idx = torch.arange(K, device=comp.device).repeat(b)
+        return self._cond(c.repeat_interleave(K, dim=0), comp.repeat_interleave(K, dim=0), idx)
+
     def _standardize(self, grain_um):
         return (torch.log10(grain_um.clamp(min=GRAIN_EPS)) - self.log_mean) / self.log_std
 
     def _destandardize(self, z):
         return 10.0 ** (z * self.log_std + self.log_mean)
 
-    def log_prob(self, context, comp_context, grain_target, mask):
-        """Summed log-density over present (spectrum, component) pairs, and their count.
+    def log_prob(self, context, comp, grain_um, mask):
+        """Summed log-density over the masked (spectrum, component) pairs, and their count.
 
-        Args:    c: Tensor [B, d_model]; comp: Tensor [B, K]; grain: Tensor [B, K] µm; mask: BoolTensor [B, K].
+        Args:    context: Tensor [B, d_model]; comp: Tensor [B, K] composition to condition on;
+                 grain_um: Tensor [B, K] µm; mask: BoolTensor [B, K] pairs to score.
         Returns: (Tensor scalar log-density sum, int count).
         """
         b, k = mask.nonzero(as_tuple=True)
         if b.numel() == 0:
             return context.new_zeros(()), 0
-        z = self._standardize(grain_target[b, k]).unsqueeze(-1)
-        lp = self.flow(self._cond(context[b], comp_context[b], k)).log_prob(z)
+        z = self._standardize(grain_um[b, k]).unsqueeze(-1)
+        lp = self.flow(self._cond(context[b], comp[b], k)).log_prob(z)
         return lp.sum(), int(b.numel())
 
     def sample_grid(self, c, comp, present_thresh: float = PRESENT_THRESH):
@@ -51,12 +63,9 @@ class GrainFlow(nn.Module):
         Args:    c: Tensor [1, d_model] or [d_model]; comp: Tensor [N, K]; present_thresh: float.
         Returns: Tensor [N, K] µm, NaN where comp <= present_thresh.
         """
-        c = c.reshape(1, -1)
         n = comp.shape[0]
-        idx = torch.arange(K, device=comp.device).repeat(n)
-        crep = c.expand(n, -1).repeat_interleave(K, dim=0)
-        comprep = comp.repeat_interleave(K, dim=0)
-        z = self.flow(self._cond(crep, comprep, idx)).sample().squeeze(-1)
+        cond = self._cond_all(c.reshape(1, -1).expand(n, -1), comp)
+        z = self.flow(cond).sample().squeeze(-1)
         grain = self._destandardize(z).reshape(n, K)
         return grain.masked_fill(comp <= present_thresh, float("nan"))
 
@@ -66,8 +75,5 @@ class GrainFlow(nn.Module):
         Used only by train.py's teacher-forced training curve; inference goes through sample_grid.
         """
         b = comp.shape[0]
-        idx = torch.arange(K, device=comp.device).repeat(b)
-        crep = c.repeat_interleave(K, dim=0)
-        comprep = comp.repeat_interleave(K, dim=0)
-        z = self.flow(self._cond(crep, comprep, idx)).sample((n,)).squeeze(-1)
+        z = self.flow(self._cond_all(c, comp)).sample((n,)).squeeze(-1)
         return self._destandardize(z).reshape(n, b, K).median(0).values

@@ -1,6 +1,13 @@
-"""CNF: conditional normalizing flow over the K-component composition simplex.
+"""CNF: conditional normalizing flow q(c | h) over the K-component composition simplex.
 
-Operates in K-1 free coordinates, wrapped in a stick-breaking transform.
+A composition has K proportions summing to 1, so only K-1 of them are free: the flow works on
+c_free = (c_1, ..., c_{K-1}) and the last is c_K = 1 − Σ c_free. The density is built as
+
+    u ~ NSF(· | h) on R^{K-1}  ->  y = scale · u  ->  c_free = StickBreaking(y)
+
+so log q(c | h) = log NSF(u | h) − log|det ∂c_free/∂u| (change of variables). Every sample is a
+valid mixture by construction. Targets with exact zeros sit on the simplex boundary, where
+stick-breaking's inverse diverges, so they are nudged inside by ``CNF.smooth`` first.
 """
 
 import torch

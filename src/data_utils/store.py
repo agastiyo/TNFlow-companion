@@ -1,12 +1,11 @@
-"""Parquet-backed sample store + declarative dataset splits.
+"""Parquet-backed sample store: build the corpus once, then read rows by id.
 
 Build:  python3.10 -m src.data_utils.store   (writes manifest.parquet + spectra.parquet)
 
-``mixture`` + ``proportion`` ids together identify a composition; ``build_splits`` keeps every
-spectrum sharing a composition (a duplicate group) in the same split.
+``manifest.parquet`` holds one metadata row per spectrum; ``spectra.parquet`` holds the ragged
+arrays. ``mixture`` + ``proportion`` ids together identify a composition, and every spectrum
+sharing one is a duplicate group (the split unit, see ``splits.py``).
 """
-
-from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -14,7 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src import config
-from src.data_utils.components import Component
+from src.data_utils.components import Component, K
 from src.data_utils.processing import more_shkuratov, shkuratov
 from src.data_utils.spectrum_sample import SpectrumSample
 
@@ -22,17 +21,7 @@ SOURCES = {"shkuratov": shkuratov, "more_shkuratov": more_shkuratov}
 
 PROPORTION_DECIMALS = 6   # round before hashing so float noise can't split a true duplicate group
 
-
-@dataclass(frozen=True)
-class DatasetSpec:
-    sources: tuple = ("shkuratov", "more_shkuratov")
-    val_frac: float = 0.2
-    seed: int = 10025734
-    holdout_mixtures: tuple = ()      # explicit component-set ids to hold out as OOD
-    n_holdout_mixtures: int = 8       # or randomly hold out this many distinct mixtures (seeded)
-
-
-DEFAULT_SPEC = DatasetSpec()
+ARRAY_COLUMNS = ("lams", "values", "target", "grains")
 
 
 def mixture_id(target) -> str:
@@ -78,70 +67,71 @@ def load_manifest() -> pd.DataFrame:
     return pd.read_parquet(config.MANIFEST_PATH)
 
 
+class Payload:
+    """Columnar view of ``spectra.parquet``: O(1) row slicing without one object per spectrum.
+
+    Each list<float32> column is kept as (flat values, offsets [N+1]); row i is
+    ``values[offsets[i]:offsets[i+1]]``. ``target`` and ``grains`` always have K entries per row.
+    """
+
+    def __init__(self, table: pa.Table):
+        self.ids = table.column("id").to_pylist()
+        self.synthetic = np.asarray(table.column("synthetic").to_pylist(), dtype=bool)
+        self.cols = {n: self._unpack(table.column(n)) for n in ARRAY_COLUMNS}
+        self._index = {sid: i for i, sid in enumerate(self.ids)}
+
+    @staticmethod
+    def _unpack(col):
+        arr = col.combine_chunks()
+        return arr.values.to_numpy(zero_copy_only=False), arr.offsets.to_numpy()
+
+    def __len__(self):
+        return len(self.ids)
+
+    def rows(self, ids) -> np.ndarray:
+        """ids -> int row positions."""
+        return np.fromiter((self._index[sid] for sid in ids), dtype=np.int64, count=len(ids))
+
+    def row(self, i: int) -> dict:
+        """Row position -> dict of lams, values, target, grains (float32 views) and synthetic."""
+        out = {n: v[o[i]:o[i + 1]] for n, (v, o) in self.cols.items()}
+        out["synthetic"] = bool(self.synthetic[i])
+        return out
+
+    def lengths(self, rows) -> np.ndarray:
+        """Row positions -> channel count per row."""
+        o = self.cols["values"][1]
+        return o[np.asarray(rows) + 1] - o[np.asarray(rows)]
+
+    def targets(self, rows) -> tuple:
+        """Row positions -> (targets [n, K], grains [n, K]) float32."""
+        rows = np.asarray(rows)
+        return (self.cols["target"][0].reshape(-1, K)[rows],
+                self.cols["grains"][0].reshape(-1, K)[rows])
+
+
 _payload = None
 
 
-def _unpack(col):
-    """List<float32> column -> (flat float32 values, int offsets [N+1]) for O(1) row slicing."""
-    arr = col.combine_chunks()
-    return arr.values.to_numpy(zero_copy_only=False), arr.offsets.to_numpy()
-
-
-def _load_payload():
+def load_payload(ids=None) -> Payload:
+    """The full corpus (read once, cached), or just ``ids`` (read fresh, not cached)."""
     global _payload
+    if ids is not None:
+        return Payload(pq.read_table(config.SPECTRA_PATH, filters=[("id", "in", list(ids))]))
     if _payload is None:
-        t = pq.read_table(config.SPECTRA_PATH)
-        ids, syn = t.column("id").to_pylist(), t.column("synthetic").to_pylist()
-        cols = {n: _unpack(t.column(n)) for n in ("lams", "values", "target", "grains")}
-        idx = {sid: i for i, sid in enumerate(ids)}
-        _payload = (idx, syn, cols)
+        _payload = Payload(pq.read_table(config.SPECTRA_PATH))
     return _payload
 
 
-def load_samples(ids) -> list:
-    idx, syn, cols = _load_payload()
+def load_samples(ids, payload=None) -> list:
+    """ids -> list[SpectrumSample] in the same order (each carries its ``sample_id``)."""
+    payload = load_payload() if payload is None else payload
     out = []
-    for sid in ids:
-        i = idx[sid]
-        row = {n: v[o[i]:o[i + 1]] for n, (v, o) in cols.items()}
-        out.append(SpectrumSample(row["lams"], row["values"], row["target"],
-                                  synthetic=syn[i], grains=row["grains"]))
+    for sid, i in zip(ids, payload.rows(ids)):
+        r = payload.row(i)
+        out.append(SpectrumSample(r["lams"], r["values"], r["target"], synthetic=r["synthetic"],
+                                  grains=r["grains"], sample_id=sid))
     return out
-
-
-def build_splits(manifest, spec) -> dict:
-    """(manifest, spec) -> {"train", "test", "ood"} id lists, deterministic from spec.seed.
-
-    1. hold out ``n_holdout_mixtures`` whole component sets -> ood
-    2. group the remainder by (mixture, proportion)
-    3. shuffle the groups and split ~val_frac by row count, keeping every group intact
-
-    Groups (not rows) are the split unit to prevent near-duplicate leakage.
-    """
-    rows = manifest[manifest["source"].isin(spec.sources)]
-    rng = np.random.default_rng(spec.seed)
-    ood_mix = set(spec.holdout_mixtures)
-    if spec.n_holdout_mixtures:
-        candidates = sorted(set(rows["mixture"]) - ood_mix)
-        ood_mix |= set(rng.choice(candidates, spec.n_holdout_mixtures, replace=False))
-
-    is_ood = rows["mixture"].isin(ood_mix)
-    ood = rows.loc[is_ood, "id"].tolist()
-
-    rest = rows.loc[~is_ood]
-    groups = rest.groupby(["mixture", "proportion"], sort=True)["id"].apply(list)
-    keys = list(groups.index)
-    order = rng.permutation(len(keys))
-
-    target = int(len(rest) * spec.val_frac)
-    test, train, n_test = [], [], 0
-    for j in order:
-        members = groups.iloc[j]
-        if n_test < target:
-            test.extend(members); n_test += len(members)
-        else:
-            train.extend(members)
-    return {"train": train, "test": test, "ood": ood}
 
 
 if __name__ == "__main__":

@@ -1,25 +1,28 @@
 """TNFlow: spectrum -> context vector -> joint posterior over composition and grain size.
 
-Model      spectrum [L] -> tokens [L, d_token] -> context [d_model] -> K-simplex posterior.
+Model      spectrum x = (λ, R) [L] -> tokens [L, d_token] -> context h(x) [d_model]
+           q(c, g | x) = q(c | h) · ∏_{k : c_k > 0} q(g_k | h, c, k)
+           c on the simplex Δ^{K-1} (composition CNF), g_k in µm (one shared grain flow).
+Training   minimize E_{p(c, g, x)}[−log q(c, g | x)] over the synthetic corpus; the grain factor is
+           teacher-forced (conditioned on the true c), see ``nll``.
 Sampling   one draw = composition [K] + grain [K] µm (NaN where that draw lacks the component).
-           n draws  = (n, K) compositions and their matching (n, K) grain sizes.
 
-    simp = model.simplex(spec, lams)     # encode once
-    comp, grain = simp.sample(2000)      # (2000, K), (2000, K) tensors; resample freely
+    post = model.posterior(spec, lams)   # encode once
+    comp, grain = post.sample(2000)      # (2000, K), (2000, K) tensors; resample freely
 
-Everything stays on the model's device. Summaries live in src/model/posterior.py.
+Everything stays on the model's device. Summaries of the draws live in src/evaluation/posterior.py.
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
 
+from src.config import SEED
 from src.data_utils.components import K
-from src.model.tokenizers import NormTokenizer, SlopeBandTokenizer
-from src.model.transformer import Transformer
 from src.model.cnf import CNF, free_to_full_simplex
 from src.model.grain import GrainFlow
-from src.model.posterior import DEFAULT_SEED
+from src.model.tokenizers import NormTokenizer, SlopeBandTokenizer
+from src.model.transformer import Transformer
 
 _TRANSFORMER_PRESETS = {
     "small":  dict(d_model=64,  n_head=4,  n_layers=2),
@@ -46,7 +49,10 @@ def _preset(table: dict, size: str, what: str) -> dict:
 
 
 class TNFlow(nn.Module):
-    """Tokenizer -> transformer -> {composition CNF, grain flow}, sized by presets."""
+    """Tokenizer -> transformer -> {composition CNF, grain flow}, sized by presets.
+
+    Submodule names (tokenizer, transformer, cnf, grain) are the checkpoint's state_dict keys.
+    """
 
     def __init__(self, transformer_size: str = "medium", comp_flow_size: str = "large",
                  grain_flow_size: str = "small", tokenizer: str = "norm",
@@ -74,8 +80,23 @@ class TNFlow(nn.Module):
                                log_grain_mean=log_grain_mean, log_grain_std=log_grain_std)
 
     def encode(self, lam, R):
-        """lam, R: Tensor [B, L] -> context Tensor [B, d_model]."""
+        """lam, R: Tensor [B, L] -> context h(x) Tensor [B, d_model]."""
         return self.transformer(self.tokenizer(lam, R))
+
+    def nll(self, context, target, grains):
+        """Negative log-likelihood terms for one batch (the training objective).
+
+        Args:    context: Tensor [B, d_model] from ``encode``; target: Tensor [B, K] true
+                 composition; grains: Tensor [B, K] true grain sizes µm (NaN where unknown).
+        Returns: (comp_nll, grain_nll) scalar Tensors. comp_nll = −log q(c | h) averaged over the
+                 B spectra. grain_nll = −log q(g_k | h, c, k) averaged over the present
+                 (spectrum, component) pairs with a known grain, conditioned on the TRUE c
+                 (teacher forcing); 0 when there are none.
+        """
+        comp_nll = -self.cnf.log_prob(context, target[:, :-1]).mean()
+        mask = (target > 0) & torch.isfinite(grains)
+        g_sum, g_n = self.grain.log_prob(context, target, grains, mask)
+        return comp_nll, -g_sum / max(g_n, 1)
 
     def _as_batch(self, spec, lams):
         """spec, lams: ndarray [L] or [B, L] -> (R, lam) Tensor [B, L] on the model device."""
@@ -86,8 +107,12 @@ class TNFlow(nn.Module):
             R, lam = R.unsqueeze(0), lam.unsqueeze(0)
         return R.to(device), lam.to(device)
 
-    def simplex(self, spec, lams, seed=DEFAULT_SEED):
-        """spec, lams: ndarray|Tensor [L] -> SimplexPosterior (runs the encoder once)."""
+    def posterior(self, spec, lams, seed=SEED):
+        """spec, lams: ndarray|Tensor [L] -> SimplexPosterior (runs the encoder once).
+
+        ``seed`` reseeds torch's GLOBAL generator (``torch.manual_seed``) before encoding, so the
+        draws that follow are reproducible; pass ``seed=None`` to leave the generator alone.
+        """
         self.eval()
         if seed is not None:
             torch.manual_seed(seed)
@@ -95,6 +120,7 @@ class TNFlow(nn.Module):
         with torch.no_grad():
             context = self.encode(lam, R)
         return SimplexPosterior(self, context)
+
 
     def attention(self, spec, lams):
         """spec, lams: ndarray [L] -> (lam [L], query-pooling weights [L] summing to 1)."""
@@ -106,7 +132,7 @@ class TNFlow(nn.Module):
 
 
 class SimplexPosterior:
-    """The K-simplex posterior for one spectrum. Sample it as often as you like."""
+    """The posterior q(c, g | x) for one spectrum. Sample it as often as you like."""
 
     def __init__(self, model, context):
         self.model = model
@@ -116,7 +142,10 @@ class SimplexPosterior:
         return f"SimplexPosterior(d_model={self.context.shape[-1]}, device={self.context.device})"
 
     def sample(self, n_samples: int = 2000):
-        """n_samples -> (composition [n, K] summing to 1, grain [n, K] µm, NaN where absent)."""
+        """n_samples -> (composition [n, K] summing to 1, grain [n, K] µm, NaN where absent).
+
+        Ancestral: c ~ q(c | h), then g_k ~ q(g_k | h, c, k) for every component the draw contains.
+        """
         with torch.no_grad():
             free = self.model.cnf.dist(self.context).sample((n_samples,)).squeeze(1)
             comp = free_to_full_simplex(free)

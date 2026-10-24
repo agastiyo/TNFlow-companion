@@ -1,34 +1,15 @@
-"""Evaluation metrics. All torch, so they run on whatever device the tensors are already on."""
+"""Scores of posterior draws against the truth. All torch, so they run on whatever device the
+tensors are already on. (Ranking components by detection lives in ``posterior.detection_score``.)
+"""
 
 import torch
 
-from src.model.grain import GRAIN_EPS, PRESENT_THRESH
+from src.model.grain import GRAIN_EPS
 
 
 def ranks_from_scores(scores):
     """scores [B, K] -> [B, K] int ranks, 0 = highest score."""
     return scores.argsort(dim=1, descending=True).argsort(dim=1)
-
-
-def detection_score(comp_draws, dim=0):
-    """comp_draws [S, ..., K] -> [..., K] score ranking components for Top-N / Top-5.
-
-    Primary key is the **detection frequency**: the fraction of posterior draws in which the
-    component clears ``PRESENT_THRESH`` -- i.e. is present enough that ``GrainFlow.sample_grid``
-    gives it a grain draw instead of NaN. Top-N asks *which components are present*, so the
-    marginal detection probability is the right quantity; posterior mean abundance conflates "how
-    often" with "how much" and ranks a trace species detected in every draw below one proposed
-    rarely but large.
-
-    Frequencies are quantised to 1/S and every never-detected component sits at exactly 0, so ties
-    are pervasive -- and ``ranks_from_scores`` breaks ties by enum index, which would hand an
-    undetected component a lucky rank. Mean abundance enters as a secondary key scaled to stay
-    strictly below one frequency step (max 1/(S+1) < 1/S), so it can only order *within* a tie
-    group, never override the frequency.
-    """
-    s = comp_draws.shape[dim]
-    freq = (comp_draws > PRESENT_THRESH).to(comp_draws.dtype).mean(dim)
-    return freq + comp_draws.mean(dim) / (s + 1)
 
 
 def recall_at_k(ranks, present, k):

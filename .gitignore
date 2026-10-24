@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+.pytest_cache/
 
 # Local editor / tool config
 .claude/

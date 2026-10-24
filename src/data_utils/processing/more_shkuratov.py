@@ -1,6 +1,6 @@
 """more_shkuratov: CANA/SDOC synthetic spectra -> SpectrumSamples (one per shk_*.txt).
 
-Ingests the files produced by ``src/data_utils/generate_shkuratov.py`` (format below), which is
+Ingests the files produced by ``src/simulator/generate.py`` (format below), which is
 distinct from the ``bestfit.*.txt`` MODEL grid read by :mod:`processing.shkuratov`::
 
     POROSITY
