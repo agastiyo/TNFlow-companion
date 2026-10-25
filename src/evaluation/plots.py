@@ -1,4 +1,4 @@
-"""Every matplotlib figure: PIT histograms, posterior marginals, JWST exemplars, attention.
+"""Figures for inference.py and apply_jwst.py: posterior marginals, attention, JWST exemplars.
 
 Figures written to disk switch to the non-interactive Agg backend; the interactive ones (used by
 ``pipeline/inference.py``) return the figure and leave the backend alone.
@@ -9,7 +9,7 @@ import numpy as np
 from src.data_utils.components import Component
 from src.evaluation.posterior import grain_draws, order_by_detection
 
-PIT_COLOR, TRUTH_COLOR, ATTN_COLOR = "#4C72B0", "red", "#C44E52"
+LINE_COLOR, ATTN_COLOR = "#4C72B0", "#C44E52"
 
 
 def _pyplot(agg=False):
@@ -30,39 +30,6 @@ def _save(fig, path, plt):
 def _axes(axes):
     """matplotlib returns a bare Axes for n=1; always give back something iterable."""
     return axes if hasattr(axes, "__len__") else [axes]
-
-
-# --------------------------------------------------------------------------- PIT
-
-def _pit_step(ax, pit_vals, title, bins, ylabel=True, xlabel=True):
-    """Draw one step-style PIT histogram on an axes (frequency = proportion)."""
-    u = np.asarray(pit_vals)
-    counts, edges = np.histogram(u, bins=bins, range=(0.0, 1.0))
-    freq = counts / len(u) if len(u) else counts.astype(float)
-    ax.stairs(freq, edges, color=PIT_COLOR, linewidth=1.5)
-    ax.axhline(1.0 / bins, color=TRUTH_COLOR, ls="--", lw=1.0)
-    ax.set_title(title, fontsize=10)
-    if ylabel:
-        ax.set_ylabel("Frequency")
-    if xlabel:
-        ax.set_xlabel("PIT value")
-
-
-def pit_grid(columns, row_titles, path, bins=10):
-    """2-row PIT histogram grid, one column per split.
-
-    Args: columns: list of (split label, row-0 PIT values, row-1 PIT values);
-          row_titles: (row-0 title, row-1 title), each formatted with ``{label}``.
-    """
-    plt = _pyplot(agg=True)
-    fig, axes = plt.subplots(2, len(columns), figsize=(3.5 * len(columns), 5.5),
-                             sharex=True, sharey="row", squeeze=False)
-    for col, (label, top, bottom) in enumerate(columns):
-        _pit_step(axes[0, col], top, row_titles[0].format(label=label), bins,
-                  ylabel=(col == 0), xlabel=False)
-        _pit_step(axes[1, col], bottom, row_titles[1].format(label=label), bins,
-                  ylabel=(col == 0), xlabel=True)
-    _save(fig, path, plt)
 
 
 # --------------------------------------------------------------------------- one posterior
@@ -114,7 +81,7 @@ def attention(sample, lam, weights, name):
     """The spectrum with its per-wavelength query-pooling attention weight below it. Returns: fig."""
     plt = _pyplot()
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
-    ax1.plot(sample.lams, sample.values, lw=1, color=PIT_COLOR)
+    ax1.plot(sample.lams, sample.values, lw=1, color=LINE_COLOR)
     ax1.set_ylabel("reflectance")
     ax1.set_title(f"{name}")
 
@@ -146,7 +113,7 @@ def jwst_exemplars(entries, path, norm_lam=0.9, norm_win=0.05):
     fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.1), sharex=True)
     for ax, (desig, group, sample) in zip(axes, entries):
         lam, R = sample.lams, normalize_at(sample.values, sample.lams, norm_lam, norm_win)
-        ax.plot(lam, R, color=PIT_COLOR, lw=0.8)
+        ax.plot(lam, R, color=LINE_COLOR, lw=0.8)
         for x, lbl in JWST_BANDS:
             ax.axvline(x, color="0.75", ls=":", lw=0.7, zorder=0)
             ax.text(x, ax.get_ylim()[1], lbl, fontsize=5.5, rotation=90,

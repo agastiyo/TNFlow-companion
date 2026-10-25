@@ -9,10 +9,11 @@ Exemplars are the highest-band-area object of each group among those with a high
 coefficient in Pinilla-Alonso et al. (2025) Table 1, chosen so each group's defining species is
 tested where its signal is strongest.
 
-Run from the project root:  python3.10 -m src.pipeline.apply_jwst [--checkpoint PATH] [--out DIR]
+Run from the project root:  OMP_NUM_THREADS=1 python -m src.pipeline.apply_jwst
+
+Writes results/jwst_<size>_<checkpoint>/: jwst_apply.json and jwst_exemplars.png.
 """
 
-import argparse
 import json
 from pathlib import Path
 
@@ -24,8 +25,10 @@ from src.data_utils.processing import jwst
 from src.evaluation import plots, report
 from src.evaluation.posterior import modes
 from src.model.grain import PRESENT_THRESH
-from src.pipeline.checkpoint import load_model
+from src.model.tnflow import load
 
+SIZE = "medium"                     # must match the checkpoint
+CHECKPOINT = "tnflow_checkpoint.pt"
 N_SAMPLES = 500
 NORM_LAM, NORM_WIN = 0.9, 0.05
 REPORT_THRESH = 0.01          # components below this in a mode are omitted from the printed table
@@ -68,9 +71,10 @@ def analyze(model, sample):
     }
 
 
-def main(checkpoint=config.CHECKPOINT, out=None):
-    model, _ = load_model(checkpoint, config.get_device())
-    out = Path(out or config.RUNS_DIR / f"jwst_{Path(checkpoint).stem}")
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = load(SIZE, config.PROJECT_ROOT / CHECKPOINT, device)
+    out = config.PROJECT_ROOT / "results" / f"jwst_{SIZE}_{Path(CHECKPOINT).stem}"
     out.mkdir(parents=True, exist_ok=True)
 
     by_desig = dict(zip(jwst.designations(), jwst.process()))
@@ -93,8 +97,4 @@ def main(checkpoint=config.CHECKPOINT, out=None):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--checkpoint", default=str(config.CHECKPOINT))
-    p.add_argument("--out", default=None)
-    args = p.parse_args()
-    main(args.checkpoint, args.out)
+    main()

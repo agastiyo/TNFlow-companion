@@ -3,7 +3,6 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-.pytest_cache/
 
 # Local editor / tool config
 .claude/
@@ -13,7 +12,6 @@ __pycache__/
 # Data — large and raw files excluded, small files tracked
 data/spectra.parquet
 data/train/
-!data/manifest.parquet
 !data/JWST_DiSCO-TNOs/
 !data/other_objects/
 
@@ -23,6 +21,8 @@ jwst_apply.json
 pit_data.json
 *.png
 runs/
+checkpoints/
+results/
 
 # Non-code content
 decks/

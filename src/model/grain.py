@@ -3,6 +3,9 @@
 One 1-D NSF over standardized log10 grain, z = (log10(g / µm) − mean) / std, shared by all K
 components; the component enters through a learned embedding. Conditioning vector per
 (spectrum, component) pair: [context h, composition c, embed(k)].
+
+mean and std are buffers (saved in the checkpoint), 0 and 1 until train.py sets them from the
+training split.
 """
 
 import torch
@@ -20,13 +23,12 @@ PRESENT_THRESH = 0.01
 class GrainFlow(nn.Module):
     """1-D NSF over standardized log10(grain/µm), conditioned on [context, composition, component embed]."""
 
-    def __init__(self, context: int, embed_dim: int = 16,
-                 log_grain_mean: float = 0.0, log_grain_std: float = 1.0, **flow_kwargs):
+    def __init__(self, context: int, embed_dim: int = 16, **flow_kwargs):
         super().__init__()
         self.embed = nn.Embedding(K, embed_dim)
         self.flow = zuko.flows.NSF(features=1, context=context + K + embed_dim, **flow_kwargs)
-        self.register_buffer("log_mean", torch.tensor(float(log_grain_mean)))
-        self.register_buffer("log_std", torch.tensor(float(log_grain_std)))
+        self.register_buffer("log_mean", torch.tensor(0.0))
+        self.register_buffer("log_std", torch.tensor(1.0))
 
     def _cond(self, c, comp, idx):
         return torch.cat([c, comp, self.embed(idx)], dim=-1)
@@ -68,12 +70,3 @@ class GrainFlow(nn.Module):
         z = self.flow(cond).sample().squeeze(-1)
         grain = self._destandardize(z).reshape(n, K)
         return grain.masked_fill(comp <= present_thresh, float("nan"))
-
-    def predict_median(self, c, comp, n=64):
-        """c [B, d_model], comp [B, K] -> median grain [B, K] µm over n draws at a fixed comp.
-
-        Used only by train.py's teacher-forced training curve; inference goes through sample_grid.
-        """
-        b = comp.shape[0]
-        z = self.flow(self._cond_all(c, comp)).sample((n,)).squeeze(-1)
-        return self._destandardize(z).reshape(n, b, K).median(0).values

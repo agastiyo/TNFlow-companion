@@ -7,6 +7,7 @@ Training   minimize E_{p(c, g, x)}[−log q(c, g | x)] over the synthetic corpus
            teacher-forced (conditioned on the true c), see ``nll``.
 Sampling   one draw = composition [K] + grain [K] µm (NaN where that draw lacks the component).
 
+    model = load("medium", "tnflow_checkpoint.pt")
     post = model.posterior(spec, lams)   # encode once
     comp, grain = post.sample(2000)      # (2000, K), (2000, K) tensors; resample freely
 
@@ -21,63 +22,40 @@ from src.config import SEED
 from src.data_utils.components import K
 from src.model.cnf import CNF, free_to_full_simplex
 from src.model.grain import GrainFlow
-from src.model.tokenizers import NormTokenizer, SlopeBandTokenizer
+from src.model.tokenizer import NormTokenizer
 from src.model.transformer import Transformer
 
-_TRANSFORMER_PRESETS = {
-    "small":  dict(d_model=64,  n_head=4,  n_layers=2),
-    "medium": dict(d_model=128, n_head=8,  n_layers=4),
-    "large":  dict(d_model=256, n_head=16, n_layers=8),
+# The transformer and the composition flow grow together; the grain flow is the same at every size.
+# "medium" is the paper model.
+SIZES = {
+    "small":  dict(d_model=64,  n_head=4,  n_layers=2, transforms=2, bins=8,  hidden=(64, 64)),
+    "medium": dict(d_model=128, n_head=8,  n_layers=4, transforms=4, bins=16, hidden=(128, 128)),
+    "large":  dict(d_model=256, n_head=16, n_layers=8, transforms=8, bins=32, hidden=(256, 256)),
 }
-_FLOW_PRESETS = {
-    "small":  dict(transforms=2, bins=8,  hidden=(64, 64)),
-    "medium": dict(transforms=4, bins=16, hidden=(128, 128)),
-    "large":  dict(transforms=8, bins=32, hidden=(256, 256)),
-}
-_TOKENIZERS = {"norm": NormTokenizer, "slope_band": SlopeBandTokenizer}
+GRAIN_FLOW = dict(transforms=2, bins=8, hidden=(64, 64))
 
 DROPOUT = 0.1
 COMP_SCALE = 2.5        # pre-shrink keeping stick-breaking preimages inside the NSF spline bound
 GRAIN_EMBED_DIM = 16
 
 
-def _preset(table: dict, size: str, what: str) -> dict:
-    try:
-        return table[size]
-    except KeyError:
-        raise ValueError(f"{what} must be one of {list(table)}, got {size!r}")
-
-
 class TNFlow(nn.Module):
-    """Tokenizer -> transformer -> {composition CNF, grain flow}, sized by presets.
+    """Tokenizer -> transformer -> {composition CNF, grain flow}.
 
     Submodule names (tokenizer, transformer, cnf, grain) are the checkpoint's state_dict keys.
     """
 
-    def __init__(self, transformer_size: str = "medium", comp_flow_size: str = "large",
-                 grain_flow_size: str = "small", tokenizer: str = "norm",
-                 log_grain_mean: float = 0.0, log_grain_std: float = 1.0):
+    def __init__(self, size: str = "medium"):
         super().__init__()
-        self.config = dict(
-            transformer_size=transformer_size, comp_flow_size=comp_flow_size,
-            grain_flow_size=grain_flow_size, tokenizer=tokenizer,
-            log_grain_mean=log_grain_mean, log_grain_std=log_grain_std,
-        )
-        tf = _preset(_TRANSFORMER_PRESETS, transformer_size, "transformer_size")
-        comp = _preset(_FLOW_PRESETS, comp_flow_size, "comp_flow_size")
-        grain = _preset(_FLOW_PRESETS, grain_flow_size, "grain_flow_size")
-        d_model = tf["d_model"]
-
-        self.tokenizer = _preset(_TOKENIZERS, tokenizer, "tokenizer")()
-        self.transformer = Transformer(self.tokenizer.d_token, d_model, tf["n_head"],
-                                       tf["n_layers"], DROPOUT)
-        self.cnf = CNF(features=K - 1, context=d_model, scale=COMP_SCALE,
-                       transforms=comp["transforms"], bins=comp["bins"],
-                       hidden_features=comp["hidden"])
-        self.grain = GrainFlow(context=d_model, embed_dim=GRAIN_EMBED_DIM,
-                               transforms=grain["transforms"], bins=grain["bins"],
-                               hidden_features=grain["hidden"],
-                               log_grain_mean=log_grain_mean, log_grain_std=log_grain_std)
+        s = SIZES[size]
+        self.tokenizer = NormTokenizer()
+        self.transformer = Transformer(self.tokenizer.d_token, s["d_model"], s["n_head"],
+                                       s["n_layers"], DROPOUT)
+        self.cnf = CNF(features=K - 1, context=s["d_model"], scale=COMP_SCALE,
+                       transforms=s["transforms"], bins=s["bins"], hidden_features=s["hidden"])
+        self.grain = GrainFlow(context=s["d_model"], embed_dim=GRAIN_EMBED_DIM,
+                               transforms=GRAIN_FLOW["transforms"], bins=GRAIN_FLOW["bins"],
+                               hidden_features=GRAIN_FLOW["hidden"])
 
     def encode(self, lam, R):
         """lam, R: Tensor [B, L] -> context h(x) Tensor [B, d_model]."""
@@ -121,7 +99,6 @@ class TNFlow(nn.Module):
             context = self.encode(lam, R)
         return SimplexPosterior(self, context)
 
-
     def attention(self, spec, lams):
         """spec, lams: ndarray [L] -> (lam [L], query-pooling weights [L] summing to 1)."""
         self.eval()
@@ -150,3 +127,10 @@ class SimplexPosterior:
             free = self.model.cnf.dist(self.context).sample((n_samples,)).squeeze(1)
             comp = free_to_full_simplex(free)
             return comp, self.model.grain.sample_grid(self.context, comp)
+
+
+def load(size, path, device="cpu"):
+    """TNFlow of the given size with the weights from a checkpoint file, in eval mode."""
+    model = TNFlow(size).to(device)
+    model.load_state_dict(torch.load(path, map_location=device)["model_state_dict"])
+    return model.eval()

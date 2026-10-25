@@ -1,86 +1,12 @@
-"""Text output: the Table 1 report, PIT histograms, and posterior summaries for one spectrum."""
+"""Text output: posterior summaries for one spectrum (used by inference.py and apply_jwst.py)."""
 
 import numpy as np
 import torch
 
-from src.config import SEED, EvalConfig
+from src.config import SEED
 from src.data_utils.components import Component
-from src.evaluation.evaluate import STAGES
 from src.evaluation.posterior import (credible, grain_draws, grain_frequency, modes,
                                       order_by_detection)
-
-ACCURACY_KEYS = ("Top-mode comp TV", "Best-mode comp TV",
-                 "Top-mode grain dex", "Best-mode grain dex", "Top = Best (%)",
-                 "Mean mode count", "Multimodal (%)")
-CALIB_KEYS = ("comp PIT W2", "grain PIT W2", "sharpness")
-
-
-# --------------------------------------------------------------------------- Table 1
-
-def report(desc, m, timings, cfg: EvalConfig = EvalConfig()):
-    """Print one split's ``summarize`` dict, PIT histograms and per-stage timings."""
-    line = "=" * 66
-    print("\n" + line)
-    print(desc)
-    print(line)
-
-    print("  per-solution accuracy (joint comp+grain BIC-GMM modes)")
-    for k in ACCURACY_KEYS:
-        if "%" in k:
-            print(f"    {k:>24s} : {m[k]:8.1f}")
-        elif k + " std" in m:
-            print(f"    {k:>24s} : {m[k]:8.4f} ± {m[k + ' std']:.4f}")
-        else:
-            print(f"    {k:>24s} : {m[k]:8.2f}")
-
-    print(f"\n  calibration  ({m['n_present']} present components, {m['n_grain']} grains)")
-    for k in CALIB_KEYS:
-        if k + " std" in m:
-            print(f"    {k:>24s} : {m[k]:8.4f} ± {m[k + ' std']:.4f}")
-        else:
-            print(f"    {k:>24s} : {m[k]:8.4f}")
-    print("      (PIT W² 0 = uniform/calibrated; sharpness = mean pairwise draw dist)")
-
-    t = cfg.trace_thresh
-    print(f"\n  composition PIT: {m['n_trace']} trace (≤{t:.0%}), "
-          f"{m['n_nontrace']} non-trace (>{t:.0%})")
-    for title, key in (("all present components; want flat", "comp_pit"),
-                       (f"trace only, ≤{t:.0%}", "comp_pit_trace"),
-                       (f"non-trace only, >{t:.0%}", "comp_pit_nontrace")):
-        print(f"\n  composition PIT histogram ({title})")
-        for ln in pit_hist(m[key], cfg.pit_bins):
-            print(ln)
-    print("\n  grain PIT histogram (log10 µm, where present)")
-    for ln in pit_hist(m["grain_pit"], cfg.pit_bins):
-        print(ln)
-
-    if timings and timings[STAGES[0]]:
-        n = len(timings[STAGES[0]])
-        per_query = np.zeros(n)
-        print(f"\n  inference cost per query, mean ± std over {n} queries (ms)")
-        for s in STAGES:
-            a = np.asarray(timings[s]) * 1e3
-            per_query += a
-            print(f"    {s:>14s} : {a.mean():8.1f} ± {a.std():6.1f}")
-        print(f"    {'TOTAL':>14s} : {per_query.mean():8.1f} ± {per_query.std():6.1f}"
-              f"   ({per_query.sum() / 1e3:.1f}s total)")
-    print(line)
-
-
-def pit_hist(u, bins=10, width=40):
-    """PIT values -> lines of a text histogram."""
-    if not u:
-        return ["    (no scored components)"]
-    counts, _ = np.histogram(np.asarray(u), bins=bins, range=(0.0, 1.0))
-    peak = max(int(counts.max()), 1)
-    ideal = len(u) / bins
-    lines = []
-    for b in range(bins):
-        lo, hi = b / bins, (b + 1) / bins
-        bar = "#" * int(round(width * counts[b] / peak))
-        lines.append(f"    [{lo:.1f},{hi:.1f}) {counts[b]:5d} {bar}")
-    lines.append(f"    (flat reference ≈ {ideal:.0f} per bin; U-shape = overconfident)")
-    return lines
 
 
 # --------------------------------------------------------------------------- one spectrum

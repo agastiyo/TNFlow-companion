@@ -17,10 +17,12 @@ from src.data_utils.components import Component, K
 from src.data_utils.processing import jwst, other_objects
 from src.data_utils.spectrum_sample import SpectrumSample
 from src.evaluation import plots, report
-from src.pipeline.checkpoint import load_model
+from src.model.tnflow import load
 
 warnings.filterwarnings('ignore')
 
+SIZE = "medium"                     # must match the checkpoint
+CHECKPOINT = "tnflow_checkpoint.pt"
 N_SAMPLES = 5000
 
 # --- Shkuratov (generated) source input: edit for a manual mixture ------------------------
@@ -91,8 +93,8 @@ class _ShkuratovSource:
         return [SpectrumSample(lams, refl, target, synthetic=True, grains=grains)]
 
 
-def main(checkpoint=config.CHECKPOINT):
-    model, _ = load_model(checkpoint)
+def main():
+    model = load(SIZE, config.PROJECT_ROOT / CHECKPOINT)
 
     sources = [("JWST", jwst), ("Other objects", other_objects),
                ("Shkuratov (generated)", _ShkuratovSource())]
